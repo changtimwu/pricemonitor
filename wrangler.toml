@@ -1,16 +1,17 @@
 name = "apple-refurb-tracker"
 main = "dist/index.js"
 compatibility_date = "2024-01-01"
+account_id = "15bfe332876061d9a548a4f3d6835657"
 
 # Runs every 30 minutes
 [triggers]
 crons = ["*/30 * * * *"]
 
-# KV namespace to store seen product IDs
-# After running `wrangler kv:namespace create SEEN_PRODUCTS`, paste the id below
+# KV namespace stores seen product IDs (created via `wrangler kv namespace create`)
 [[kv_namespaces]]
 binding = "SEEN_PRODUCTS"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "224d2081abc042c89d2cfb850ae79fd9"
 
-# LINE_NOTIFY_TOKEN is stored as a secret (never hardcode it)
-# Set it with: wrangler secret put LINE_NOTIFY_TOKEN
+# Secrets (set via `wrangler secret put`, never hardcode):
+#   RESEND_API_KEY  — Resend API key from https://resend.com/api-keys
+#   NOTIFY_EMAIL_TO — recipient email address

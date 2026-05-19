@@ -3,13 +3,15 @@
  * Runs on Cloudflare Workers via cron trigger (every 30 min).
  *
  * Environment bindings required (set in wrangler.toml / Cloudflare dashboard):
- *   - SEEN_PRODUCTS : KV namespace  (stores seen product IDs)
- *   - LINE_NOTIFY_TOKEN : Secret    (your LINE Notify token)
+ *   - SEEN_PRODUCTS    : KV namespace  (stores seen product IDs)
+ *   - RESEND_API_KEY   : Secret        (Resend API key, https://resend.com)
+ *   - NOTIFY_EMAIL_TO  : Secret        (recipient email address)
  */
 
 export interface Env {
   SEEN_PRODUCTS: KVNamespace;
-  LINE_NOTIFY_TOKEN: string;
+  RESEND_API_KEY: string;
+  NOTIFY_EMAIL_TO: string;
 }
 
 interface Product {
@@ -111,23 +113,32 @@ function isTarget(product: Product): boolean {
 }
 
 // ─────────────────────────────────────────────
-//  LINE NOTIFY
+//  EMAIL NOTIFY (Resend)
 // ─────────────────────────────────────────────
 
-async function sendLineNotify(token: string, message: string): Promise<void> {
-  const resp = await fetch("https://notify-api.line.me/api/notify", {
+// Resend's testing sender works without DNS setup. Swap to a verified
+// from-address once you've added your own domain in the Resend dashboard.
+const EMAIL_FROM = "Apple Refurb Tracker <onboarding@resend.dev>";
+
+async function sendEmail(
+  apiKey: string,
+  to: string,
+  subject: string,
+  text: string
+): Promise<void> {
+  const resp = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
     },
-    body: new URLSearchParams({ message }),
+    body: JSON.stringify({ from: EMAIL_FROM, to, subject, text }),
   });
   if (!resp.ok) {
     const body = await resp.text();
-    console.error(`LINE Notify failed: ${resp.status} ${body}`);
+    console.error(`Resend failed: ${resp.status} ${body}`);
   } else {
-    console.log("LINE Notify sent ✓");
+    console.log("Email sent ✓");
   }
 }
 
@@ -171,15 +182,17 @@ async function checkRefurb(env: Env): Promise<void> {
 
   if (newItems.length > 0) {
     console.log(`🆕 ${newItems.length} new item(s) found!`);
-    for (const item of newItems) {
-      const msg =
-        `\n🖥️ Apple 整修品上架通知！\n` +
-        `產品：${item.name}\n` +
-        `價格：${item.price ? `NT$ ${item.price.toLocaleString()}` : "價格未知"}\n` +
-        `連結：${item.url}`;
-      console.log(msg);
-      await sendLineNotify(env.LINE_NOTIFY_TOKEN, msg);
-    }
+    const body = newItems
+      .map(
+        (item) =>
+          `產品：${item.name}\n` +
+          `價格：${item.price ? `NT$ ${item.price.toLocaleString()}` : "價格未知"}\n` +
+          `連結：${item.url}\n`
+      )
+      .join("\n");
+    const subject = `🖥️ Apple 整修品上架通知 (${newItems.length})`;
+    console.log(`${subject}\n${body}`);
+    await sendEmail(env.RESEND_API_KEY, env.NOTIFY_EMAIL_TO, subject, body);
     await saveSeen(env.SEEN_PRODUCTS, seen);
   } else {
     console.log("No new target products found.");
