@@ -6,13 +6,18 @@
  * the items matching their personal spec, exactly once.
  *
  * Bindings:
- *   - SEEN_PRODUCTS   : KV namespace  (stores sub:<uuid> records)
+ *   - SEEN_PRODUCTS   : KV namespace  (stores sub:<uuid> + spec:<sku>)
  *   - RESEND_API_KEY  : Secret        (https://resend.com)
+ *   - BROWSER         : Browser Rendering binding (fallback crawler)
  */
+
+import puppeteer from "@cloudflare/puppeteer";
 
 export interface Env {
   SEEN_PRODUCTS: KVNamespace;
   RESEND_API_KEY: string;
+  PUBLIC_ORIGIN: string;
+  BROWSER: Fetcher;
 }
 
 interface Product {
@@ -29,6 +34,13 @@ interface Subscription {
   maxPrice: number; // 0 = no cap
   createdAt: string;
   seenIds: string[];
+}
+
+interface ProductDetail {
+  ram?: string;     // e.g. "32GB"
+  storage?: string; // e.g. "2TB"
+  fetchedAt: string;
+  source: "raw" | "browser";
 }
 
 // Apple embeds product data as schema.org JSON-LD blocks in the HTML page.
@@ -188,6 +200,66 @@ async function deleteSub(kv: KVNamespace, id: string): Promise<boolean> {
 }
 
 // ─────────────────────────────────────────────
+//  PRODUCT DETAIL ENRICHMENT (RAM + storage)
+// ─────────────────────────────────────────────
+
+// The tech-specs panel is in initial HTML (CSS-hidden behind an accordion).
+// Raw fetch picks up everything; we only fall back to Browser Rendering if
+// the page comes back empty or without the spec section — e.g. if Apple
+// later changes to client-side rendering.
+const SPEC_SECTION_MARKER = "rf-pdp-techspecssection";
+const RAM_RE = /(\d+(?:\.\d+)?)\s*GB\s*統一記憶體/;
+const STORAGE_RE = /(\d+(?:\.\d+)?\s*(?:GB|TB))\s*SSD/;
+const SPEC_PREFIX = "spec:";
+
+function parseDetail(html: string, source: ProductDetail["source"]): ProductDetail {
+  const ramMatch = html.match(RAM_RE);
+  const storageMatch = html.match(STORAGE_RE);
+  return {
+    ram: ramMatch ? `${ramMatch[1]}GB` : undefined,
+    storage: storageMatch ? storageMatch[1].replace(/\s+/g, "") : undefined,
+    fetchedAt: new Date().toISOString(),
+    source,
+  };
+}
+
+async function fetchDetailViaBrowser(env: Env, url: string): Promise<string> {
+  console.log(`  browser-render ${url}`);
+  const browser = await puppeteer.launch(env.BROWSER);
+  try {
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    return await page.content();
+  } finally {
+    await browser.close();
+  }
+}
+
+async function getProductDetail(env: Env, sku: string, url: string): Promise<ProductDetail> {
+  const cached = await env.SEEN_PRODUCTS.get(SPEC_PREFIX + sku);
+  if (cached) return JSON.parse(cached) as ProductDetail;
+
+  let html = "";
+  try {
+    const resp = await fetch(url, { headers: FETCH_HEADERS });
+    if (resp.ok) html = await resp.text();
+  } catch (e) {
+    console.log(`  raw fetch threw for ${sku}: ${e}`);
+  }
+
+  let detail: ProductDetail;
+  if (html && html.includes(SPEC_SECTION_MARKER)) {
+    detail = parseDetail(html, "raw");
+  } else {
+    console.log(`  raw fetch missing specs for ${sku}; using browser fallback`);
+    html = await fetchDetailViaBrowser(env, url);
+    detail = parseDetail(html, "browser");
+  }
+  await env.SEEN_PRODUCTS.put(SPEC_PREFIX + sku, JSON.stringify(detail));
+  return detail;
+}
+
+// ─────────────────────────────────────────────
 //  CHECK ALL SUBSCRIBERS
 // ─────────────────────────────────────────────
 
@@ -202,11 +274,12 @@ async function checkAllSubs(env: Env, origin: string): Promise<void> {
 
   for (const sub of subs) {
     const seen = new Set(sub.seenIds);
-    const newForSub: Product[] = [];
+    const newForSub: Array<Product & { detail: ProductDetail }> = [];
     for (const p of products) {
       if (!matches(p, sub)) continue;
       if (seen.has(p.id)) continue;
-      newForSub.push(p);
+      const detail = await getProductDetail(env, p.id, p.url);
+      newForSub.push({ ...p, detail });
       seen.add(p.id);
     }
     if (newForSub.length === 0) {
@@ -216,12 +289,19 @@ async function checkAllSubs(env: Env, origin: string): Promise<void> {
     console.log(`  ${sub.email}: ${newForSub.length} new match(es)`);
     const body =
       newForSub
-        .map(
-          (item) =>
+        .map((item) => {
+          const specBits = [
+            item.detail.ram ? `記憶體 ${item.detail.ram}` : null,
+            item.detail.storage ? `儲存 ${item.detail.storage}` : null,
+          ].filter(Boolean);
+          const specLine = specBits.length ? `規格：${specBits.join(" · ")}\n` : "";
+          return (
             `產品：${item.name}\n` +
             `價格：${item.price ? `NT$ ${item.price.toLocaleString()}` : "價格未知"}\n` +
+            specLine +
             `連結：${item.url}\n`
-        )
+          );
+        })
         .join("\n") +
       `\n---\n取消訂閱 / Unsubscribe: ${origin}/unsubscribe/${sub.id}\n`;
     const subject = `🖥️ Apple 整修品上架通知 (${newForSub.length})`;
@@ -380,16 +460,14 @@ async function handleUnsubscribe(env: Env, id: string): Promise<Response> {
 // ─────────────────────────────────────────────
 
 export default {
-  // Note: scheduled has no Request, so we can't derive origin. Use the
-  // Worker's public hostname directly — this is only used in unsub links
-  // in emails. Override via setting `PUBLIC_ORIGIN` env var if needed.
+  // Scheduled has no Request, so we read the public origin from `[vars]`
+  // in wrangler.toml. Only used to build unsubscribe links in cron emails.
   async scheduled(
     _controller: ScheduledController,
     env: Env,
     ctx: ExecutionContext
   ): Promise<void> {
-    const origin = "https://apple-refurb-tracker.changtimwu.workers.dev";
-    ctx.waitUntil(checkAllSubs(env, origin));
+    ctx.waitUntil(checkAllSubs(env, env.PUBLIC_ORIGIN));
   },
 
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {

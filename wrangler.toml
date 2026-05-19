@@ -1,17 +1,32 @@
 name = "apple-refurb-tracker"
 main = "dist/index.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
 account_id = "15bfe332876061d9a548a4f3d6835657"
+
+# Bind a custom domain on the itsi.xyz zone. Cloudflare auto-creates the
+# proxied DNS record and provisions TLS — no manual DNS step needed.
+routes = [
+  { pattern = "apple-refurb-tracker.itsi.xyz", custom_domain = true }
+]
+
+# Plain env vars (not secrets) — exposed to the Worker as `env.<NAME>`.
+[vars]
+PUBLIC_ORIGIN = "https://apple-refurb-tracker.itsi.xyz"
+
+# Browser Rendering binding — used as a fallback when raw fetch fails to
+# return server-rendered HTML. Requires the Workers Paid plan.
+[browser]
+binding = "BROWSER"
 
 # Runs every 30 minutes
 [triggers]
 crons = ["*/30 * * * *"]
 
-# KV namespace stores seen product IDs (created via `wrangler kv namespace create`)
+# KV namespace stores per-subscriber records (sub:<uuid> keys).
 [[kv_namespaces]]
 binding = "SEEN_PRODUCTS"
 id = "224d2081abc042c89d2cfb850ae79fd9"
 
 # Secrets (set via `wrangler secret put`, never hardcode):
-#   RESEND_API_KEY  — Resend API key from https://resend.com/api-keys
-#   NOTIFY_EMAIL_TO — recipient email address
+#   RESEND_API_KEY — Resend API key from https://resend.com/api-keys
