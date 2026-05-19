@@ -1,5 +1,5 @@
 name = "apple-refurb-tracker"
-main = "src/index.js"
+main = "dist/index.js"
 compatibility_date = "2024-01-01"
 
 # Runs every 30 minutes
