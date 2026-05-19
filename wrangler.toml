@@ -1,0 +1,16 @@
+name = "apple-refurb-tracker"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# Runs every 30 minutes
+[triggers]
+crons = ["*/30 * * * *"]
+
+# KV namespace to store seen product IDs
+# After running `wrangler kv:namespace create SEEN_PRODUCTS`, paste the id below
+[[kv_namespaces]]
+binding = "SEEN_PRODUCTS"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+# LINE_NOTIFY_TOKEN is stored as a secret (never hardcode it)
+# Set it with: wrangler secret put LINE_NOTIFY_TOKEN
