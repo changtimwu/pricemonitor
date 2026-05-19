@@ -19,20 +19,20 @@ interface Product {
   url: string;
 }
 
-interface RawProduct {
-  name?: string;
-  title?: string;
-  productName?: string;
-  price?: { currentPrice?: number; raw?: number };
-  regularPrice?: number;
-  partNumber?: string;
+// Apple embeds product data as schema.org JSON-LD blocks in the HTML page.
+interface LdOffer {
+  "@type": "Offer";
+  price?: number;
+  priceCurrency?: string;
   sku?: string;
-  id?: string;
 }
 
-interface RefurbResponse {
-  products?: RawProduct[];
-  data?: { products?: RawProduct[] };
+interface LdProduct {
+  "@context": "https://schema.org";
+  "@type": "Product";
+  name?: string;
+  url?: string;
+  offers?: LdOffer | LdOffer[];
 }
 
 // ─────────────────────────────────────────────
@@ -44,47 +44,59 @@ const WATCH_KEYWORDS = ["Mac Studio", "Mac Mini"];
 // Set to 0 to disable price filtering
 const MAX_PRICE_TWD = 0;
 
-const APPLE_REFURB_URL =
-  "https://www.apple.com/tw/shop/product-list?" +
-  new URLSearchParams({ sel: "refurbished", per_page: "100", page: "1" });
+const APPLE_REFURB_URL = "https://www.apple.com/tw/shop/refurbished/mac";
 
 const FETCH_HEADERS: HeadersInit = {
   "User-Agent":
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  Accept: "application/json, text/plain, */*",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-  Referer: "https://www.apple.com/tw/shop/refurbished/mac",
 };
 
 // ─────────────────────────────────────────────
 //  FETCH PRODUCTS
 // ─────────────────────────────────────────────
 
-async function fetchRefurbProducts(): Promise<RawProduct[]> {
+const LD_JSON_RE =
+  /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+
+async function fetchRefurbProducts(): Promise<LdProduct[]> {
   const resp = await fetch(APPLE_REFURB_URL, { headers: FETCH_HEADERS });
-  if (!resp.ok) throw new Error(`Apple API error: ${resp.status}`);
+  if (!resp.ok) throw new Error(`Apple page error: ${resp.status}`);
 
-  const data = (await resp.json()) as RefurbResponse;
+  const html = await resp.text();
+  const products: LdProduct[] = [];
 
-  // Normalise across possible response shapes
-  return data.products || data?.data?.products || [];
+  for (const match of html.matchAll(LD_JSON_RE)) {
+    const blob = match[1].trim();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(blob);
+    } catch {
+      continue;
+    }
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      (parsed as LdProduct)["@type"] === "Product"
+    ) {
+      products.push(parsed as LdProduct);
+    }
+  }
+  return products;
 }
 
-function parseProduct(p: RawProduct): Product | null {
-  const name = p.name || p.title || p.productName || "";
-  const price =
-    p?.price?.currentPrice ||
-    p?.price?.raw ||
-    p?.regularPrice ||
-    0;
-  const id = p.partNumber || p.sku || p.id || "";
-  const url = id
-    ? `https://www.apple.com/tw/shop/product/${id}`
-    : "https://www.apple.com/tw/shop/refurbished/mac";
+function parseProduct(p: LdProduct): Product | null {
+  const name = p.name || "";
+  const offer = Array.isArray(p.offers) ? p.offers[0] : p.offers;
+  const price = Number(offer?.price) || 0;
+  const id = offer?.sku || "";
+  const url =
+    p.url || "https://www.apple.com/tw/shop/refurbished/mac";
 
   if (!name || !id) return null;
-  return { id, name, price: Number(price) || 0, url };
+  return { id, name, price, url };
 }
 
 function isTarget(product: Product): boolean {
